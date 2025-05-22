@@ -596,7 +596,7 @@ class TrendFollowingStrategy:
         print(f"최대 낙폭: {results['max_drawdown'] * 100:.2f}%")
         print(f"최종 자본금: {results['final_capital']:.2f} USDT")
     
-    def fetch_data(self, exchange_id='binance', symbol='BTC/USDT', timeframe='4h', since=None, until=None, limit=500):
+    def fetch_data(self, exchange_id='binance', symbol='BTC/USDT', timeframe='4h', since=None, until=None, limit=1000):
         """
         거래소에서 OHLCV 데이터 가져오기
         
@@ -606,7 +606,7 @@ class TrendFollowingStrategy:
             timeframe (str): 시간프레임 (예: '1h', '4h', '1d')
             since (int): 시작 타임스탬프 (밀리초)
             until (int): 종료 타임스탬프 (밀리초)
-            limit (int): 가져올 캔들 수
+            limit (int): 각 요청당 가져올 캔들 개수
             
         Returns:
             pandas.DataFrame: OHLCV 데이터
@@ -629,31 +629,53 @@ class TrendFollowingStrategy:
         current_since = since
         timeframe_in_seconds = exchange.parse_timeframe(timeframe)
         
-        # 데이터를 여러 번 나눠서 가져오기 (최대 5번 또는 현재 시간까지)
-        for i in range(5):  # 최대 5번 시도
+        # 예상되는 총 캔들 수 계산
+        estimated_candles = (now - since) / (timeframe_in_seconds * 1000)
+        estimated_requests = min(30, max(5, int(estimated_candles / limit) + 1))  # 최소 5회, 최대 30회 요청
+        
+        print(f"지정된 기간: {datetime.fromtimestamp(since/1000)} ~ {datetime.fromtimestamp(now/1000)}")
+        print(f"예상 캔들 수: 약 {int(estimated_candles)}개")
+        print(f"요청 계획: 최대 {estimated_requests}회 API 요청 (각 요청당 최대 {limit}개 캔들)")
+        
+        # 데이터를 여러 번 나눠서 가져오기 (최대 예상 요청 수 또는 현재 시간까지)
+        for i in range(estimated_requests):
             if current_since >= now:
+                print(f"지정된 종료 시간에 도달했습니다. 데이터 수집 완료.")
                 break
                 
-            print(f"데이터 요청 {i+1}/5: {datetime.fromtimestamp(current_since/1000).strftime('%Y-%m-%d %H:%M:%S')} 부터")
+            # 진행률 표시
+            progress = min(100, int((current_since - since) / (now - since) * 100)) if now > since else 0
+            print(f"데이터 요청 {i+1}/{estimated_requests} ({progress}% 진행): {datetime.fromtimestamp(current_since/1000).strftime('%Y-%m-%d %H:%M:%S')} 부터")
             
             try:
                 # API 호출로 데이터 가져오기
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, current_since, min(1000, limit))
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, current_since, limit)
                 
                 if len(ohlcv) == 0:
+                    print("더 이상 가져올 데이터가 없습니다.")
                     break
                 
+                # 중복 제거를 위해 이미 가져온 타임스탬프 체크
+                if all_ohlcv and ohlcv[0][0] == all_ohlcv[-1][0]:
+                    ohlcv = ohlcv[1:]  # 첫 번째 캔들이 중복이면 제거
+                
                 all_ohlcv.extend(ohlcv)
+                print(f"  - {len(ohlcv)}개 캔들 추가 (누적: {len(all_ohlcv)}개)")
                 
                 # 다음 시작 시간 설정 (마지막 캔들 이후)
-                current_since = ohlcv[-1][0] + timeframe_in_seconds * 1000
+                if ohlcv:
+                    current_since = ohlcv[-1][0] + timeframe_in_seconds * 1000
+                else:
+                    break
                 
                 # API 속도 제한 방지를 위한 대기
-                time.sleep(1)
+                time.sleep(1.5)  # 좀 더 긴 대기 시간으로 조정
                 
             except Exception as e:
                 print(f"데이터 가져오기 오류: {e}")
-                break
+                # 오류 발생 시 잠시 대기 후 재시도
+                time.sleep(5)
+                continue
         
         if not all_ohlcv:
             raise Exception("데이터를 가져올 수 없습니다.")
@@ -664,5 +686,22 @@ class TrendFollowingStrategy:
         df.set_index('timestamp', inplace=True)
         df = df.drop_duplicates()  # 중복 제거
         
-        print(f"가져온 총 캔들 수: {len(df)}")
+        # 지정된 기간으로 필터링
+        if since is not None:
+            since_dt = pd.to_datetime(since, unit='ms')
+            df = df[df.index >= since_dt]
+        
+        if until is not None:
+            until_dt = pd.to_datetime(until, unit='ms')
+            df = df[df.index <= until_dt]
+        
+        # 결과 요약
+        if not df.empty:
+            print(f"\n데이터 가져오기 완료:")
+            print(f"가져온 총 캔들 수: {len(df)}개")
+            print(f"기간: {df.index[0]} ~ {df.index[-1]}")
+            print(f"시간프레임: {timeframe}")
+        else:
+            print("가져온 데이터가 없습니다.")
+        
         return df 

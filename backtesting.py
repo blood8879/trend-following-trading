@@ -293,6 +293,9 @@ def main():
             long_loss = abs(long_losses['pnl'].sum()) if not long_losses.empty else 0
             long_profit_factor = calculate_profit_factor(long_profit, long_loss)
             
+            # 롱 포지션 순 수익 (이익 - 손실)
+            long_net_profit = long_exits_df['pnl'].sum()
+            
             # 롱 포지션 샤프 지수
             if not long_exits_df.empty:
                 long_returns = long_exits_df['pnl'].values / args_dict["initial_capital"]
@@ -301,7 +304,9 @@ def main():
                 long_sharpe = 0
                 
             print(f"\n롱 포지션 승률: {long_win_rate * 100:.2f}% ({len(long_wins)}/{len(long_exits_df)})")
-            print(f"롱 포지션 총 수익: {long_profit:.2f} USDT")
+            print(f"롱 포지션 총 이익: {long_profit:.2f} USDT")
+            print(f"롱 포지션 총 손실: {long_loss:.2f} USDT")
+            print(f"롱 포지션 순 수익: {long_net_profit:.2f} USDT")
             print(f"롱 포지션 손익비: {long_profit_factor:.2f}")
             print(f"롱 포지션 샤프 지수: {long_sharpe:.2f}")
         
@@ -317,6 +322,9 @@ def main():
             short_loss = abs(short_losses['pnl'].sum()) if not short_losses.empty else 0
             short_profit_factor = calculate_profit_factor(short_profit, short_loss)
             
+            # 숏 포지션 순 수익 (이익 - 손실)
+            short_net_profit = short_exits_df['pnl'].sum()
+            
             # 숏 포지션 샤프 지수
             if not short_exits_df.empty:
                 short_returns = short_exits_df['pnl'].values / args_dict["initial_capital"]
@@ -325,9 +333,21 @@ def main():
                 short_sharpe = 0
                 
             print(f"\n숏 포지션 승률: {short_win_rate * 100:.2f}% ({len(short_wins)}/{len(short_exits_df)})")
-            print(f"숏 포지션 총 수익: {short_profit:.2f} USDT")
+            print(f"숏 포지션 총 이익: {short_profit:.2f} USDT")
+            print(f"숏 포지션 총 손실: {short_loss:.2f} USDT")
+            print(f"숏 포지션 순 수익: {short_net_profit:.2f} USDT")
             print(f"숏 포지션 손익비: {short_profit_factor:.2f}")
             print(f"숏 포지션 샤프 지수: {short_sharpe:.2f}")
+        
+        # 전체 순 수익 계산 및 표시
+        if long_exits or short_exits:
+            total_net_profit = 0
+            if long_exits:
+                total_net_profit += pd.DataFrame(long_exits)['pnl'].sum()
+            if short_exits:
+                total_net_profit += pd.DataFrame(short_exits)['pnl'].sum()
+            print(f"\n전체 순 수익: {total_net_profit:.2f} USDT")
+            print(f"초기 자본금 대비 수익률: {(total_net_profit / args_dict['initial_capital']) * 100:.2f}%")
         
         # 청산 이유 분석
         exit_reasons = exit_trades['reason'].value_counts()
