@@ -1,0 +1,8 @@
+{
+  "api_key": "YOUR_BINANCE_API_KEY_HERE",
+  "api_secret": "YOUR_BINANCE_API_SECRET_HERE",
+  "test_mode": true,
+  "max_trade_amount": 100,
+  "symbol": "BTCUSDT",
+  "timeframe": "4h"
+}

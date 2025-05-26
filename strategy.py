@@ -28,6 +28,13 @@ class TrendFollowingStrategy:
         self.entry_price = 0
         self.position_size = 0
         self.stop_loss = 0
+        self.secondary_stop_loss = 0  # 2차 손절선 추가
+        
+        # 부분 익절 관리를 위한 변수 추가
+        self.exit_stage = 0  # 0: 아직 익절 없음, 1: 1차 익절, 2: 2차 익절
+        self.remaining_position_pct = 1.0  # 남아있는 포지션 비율
+        self.last_candle_was_up = False  # 직전 캔들 상승 여부
+        self.sl_triggered = False  # 1차 손절 발생 여부
         
         # 거래 기록
         self.trades = []
@@ -279,7 +286,7 @@ class TrendFollowingStrategy:
         # Drawdown 기록
         self.drawdowns.append(self.current_drawdown)
     
-    def enter_position(self, direction, price, timestamp, stop_loss_price):
+    def enter_position(self, direction, price, timestamp, stop_loss_price, secondary_stop_loss=None):
         """
         포지션 진입
         
@@ -287,7 +294,8 @@ class TrendFollowingStrategy:
             direction (int): 포지션 방향 (1: 롱, -1: 숏)
             price (float): 진입 가격
             timestamp (datetime): 진입 시간
-            stop_loss_price (float): 손절 가격
+            stop_loss_price (float): 1차 손절 가격
+            secondary_stop_loss (float): 2차 손절 가격 (횡보 구간의 하단/상단)
         """
         # 이미 포지션이 있는 경우 무시
         if self.position != 0:
@@ -301,6 +309,13 @@ class TrendFollowingStrategy:
         self.entry_price = price
         self.position_size = size
         self.stop_loss = stop_loss_price
+        self.secondary_stop_loss = secondary_stop_loss
+        
+        # 익절 관련 변수 초기화
+        self.exit_stage = 0
+        self.remaining_position_pct = 1.0
+        self.last_candle_was_up = False
+        self.sl_triggered = False
         
         # 거래 기록 추가
         self.trades.append({
@@ -309,10 +324,11 @@ class TrendFollowingStrategy:
             'price': price,
             'size': size,
             'timestamp': timestamp,
-            'stop_loss': stop_loss_price
+            'stop_loss': stop_loss_price,
+            'secondary_stop_loss': secondary_stop_loss
         })
     
-    def exit_position(self, price, timestamp, reason=""):
+    def exit_position(self, price, timestamp, reason="", partial_pct=1.0):
         """
         포지션 청산
         
@@ -320,14 +336,19 @@ class TrendFollowingStrategy:
             price (float): 청산 가격
             timestamp (datetime): 청산 시간
             reason (str): 청산 이유
+            partial_pct (float): 청산 비율 (0.0 ~ 1.0, 1.0은 전체 청산)
         """
         # 포지션이 없는 경우 무시
-        if self.position == 0:
+        if self.position == 0 or self.remaining_position_pct <= 0:
             return
+        
+        # 실제 청산할 포지션 비율 계산 (남아있는 포지션의 partial_pct%)
+        exit_pct = min(partial_pct, self.remaining_position_pct)
+        actual_exit_size = self.position_size * (exit_pct / self.remaining_position_pct)
         
         # 손익 계산
         price_change = (price - self.entry_price) * self.position
-        pnl = price_change * self.position_size
+        pnl = price_change * actual_exit_size
         
         # 자본금 업데이트
         self.capital += pnl
@@ -337,19 +358,27 @@ class TrendFollowingStrategy:
             'type': 'exit',
             'price': price,
             'pnl': pnl,
+            'size': actual_exit_size,
+            'exit_pct': exit_pct,
             'timestamp': timestamp,
             'reason': reason
         })
         
-        # 포지션 정보 초기화
-        self.position = 0
-        self.entry_price = 0
-        self.position_size = 0
-        self.stop_loss = 0
+        # 남은 포지션 비율 업데이트
+        self.remaining_position_pct -= exit_pct
+        
+        # 포지션을 모두 청산했으면 포지션 정보 초기화
+        if self.remaining_position_pct <= 0:
+            self.position = 0
+            self.entry_price = 0
+            self.position_size = 0
+            self.stop_loss = 0
+            self.exit_stage = 0
+            self.remaining_position_pct = 0
     
     def check_stop_loss(self, current_price, timestamp):
         """
-        손절 조건 확인
+        손절 조건 확인 (2단계 손절 전략)
         
         Args:
             current_price (float): 현재 가격
@@ -358,56 +387,98 @@ class TrendFollowingStrategy:
         Returns:
             bool: 손절 실행 여부
         """
-        if self.position == 0:
+        if self.position == 0 or self.remaining_position_pct <= 0:
             return False
         
         # 롱 포지션 손절
-        if self.position == 1 and current_price <= self.stop_loss:
-            self.exit_position(current_price, timestamp, "stop_loss")
-            return True
+        if self.position == 1:
+            # 1차 손절선 (돌파 캔들의 저점) - 포지션의 절반 손절
+            if not self.sl_triggered and current_price <= self.stop_loss:
+                self.exit_position(current_price, timestamp, "stop_loss_1", 0.5)
+                self.sl_triggered = True
+                return True
+            
+            # 2차 손절선 (횡보 구간의 하단) - 남은 포지션 전부 손절
+            elif self.sl_triggered and self.secondary_stop_loss and current_price <= self.secondary_stop_loss:
+                self.exit_position(current_price, timestamp, "stop_loss_2", self.remaining_position_pct)
+                return True
         
         # 숏 포지션 손절
-        elif self.position == -1 and current_price >= self.stop_loss:
-            self.exit_position(current_price, timestamp, "stop_loss")
-            return True
+        elif self.position == -1:
+            # 1차 손절선 (돌파 캔들의 고점) - 포지션의 절반 손절
+            if not self.sl_triggered and current_price >= self.stop_loss:
+                self.exit_position(current_price, timestamp, "stop_loss_1", 0.5)
+                self.sl_triggered = True
+                return True
+            
+            # 2차 손절선 (횡보 구간의 상단) - 남은 포지션 전부 손절
+            elif self.sl_triggered and self.secondary_stop_loss and current_price >= self.secondary_stop_loss:
+                self.exit_position(current_price, timestamp, "stop_loss_2", self.remaining_position_pct)
+                return True
         
         return False
     
-    def check_take_profit(self, current_price, timestamp, ema10, ema20):
+    def check_take_profit(self, current_price, timestamp, ema10, ema20, prev_price=None):
         """
-        익절 조건 확인
+        익절 조건 확인 (3단계 부분 익절 전략)
         
         Args:
             current_price (float): 현재 가격
             timestamp (datetime): 현재 시간
             ema10 (float): 10일 EMA 값
             ema20 (float): 20일 EMA 값
+            prev_price (float): 이전 캔들 종가
             
         Returns:
             bool: 익절 실행 여부
         """
-        if self.position == 0:
+        if self.position == 0 or self.remaining_position_pct <= 0:
             return False
+        
+        # 음봉/양봉 확인 (이전 가격이 제공된 경우)
+        if prev_price is not None:
+            current_candle_is_up = current_price > prev_price
+            
+            # 롱 포지션의 경우 양봉 후 음봉 발생 체크
+            if self.position == 1 and self.exit_stage == 0 and self.last_candle_was_up and not current_candle_is_up:
+                # 첫 번째 익절: 음봉 발생 시 1/3 익절
+                self.exit_position(current_price, timestamp, "tp_stage1", 1/3)
+                self.exit_stage = 1
+                return True
+            
+            # 숏 포지션의 경우 음봉 후 양봉 발생 체크
+            elif self.position == -1 and self.exit_stage == 0 and not self.last_candle_was_up and current_candle_is_up:
+                # 첫 번째 익절: 양봉 발생 시 1/3 익절
+                self.exit_position(current_price, timestamp, "tp_stage1", 1/3)
+                self.exit_stage = 1
+                return True
+            
+            # 현재 캔들 상태 저장
+            self.last_candle_was_up = current_candle_is_up
         
         # 포지션 방향과 반대 방향으로 EMA 이탈 확인
         if self.position == 1:  # 롱 포지션
-            # 10일 EMA 아래로 이탈
-            if current_price < ema10:
-                self.exit_position(current_price, timestamp, "tp_ema10")
+            # 10일 EMA 아래로 이탈 (2차 익절)
+            if self.exit_stage < 2 and current_price < ema10:
+                self.exit_position(current_price, timestamp, "tp_ema10", 1/2)  # 남은 포지션의 절반 (전체의 1/3)
+                self.exit_stage = 2
                 return True
-            # 20일 EMA 아래로 이탈
-            elif current_price < ema20:
-                self.exit_position(current_price, timestamp, "tp_ema20")
+            # 20일 EMA 아래로 이탈 (3차 익절)
+            elif self.exit_stage == 2 and current_price < ema20:
+                self.exit_position(current_price, timestamp, "tp_ema20", 1.0)  # 남은 포지션 전부 (전체의 1/3)
+                self.exit_stage = 3
                 return True
                 
         elif self.position == -1:  # 숏 포지션
-            # 10일 EMA 위로 이탈
-            if current_price > ema10:
-                self.exit_position(current_price, timestamp, "tp_ema10")
+            # 10일 EMA 위로 이탈 (2차 익절)
+            if self.exit_stage < 2 and current_price > ema10:
+                self.exit_position(current_price, timestamp, "tp_ema10", 1/2)  # 남은 포지션의 절반 (전체의 1/3)
+                self.exit_stage = 2
                 return True
-            # 20일 EMA 위로 이탈
-            elif current_price > ema20:
-                self.exit_position(current_price, timestamp, "tp_ema20")
+            # 20일 EMA 위로 이탈 (3차 익절)
+            elif self.exit_stage == 2 and current_price > ema20:
+                self.exit_position(current_price, timestamp, "tp_ema20", 1.0)  # 남은 포지션 전부 (전체의 1/3)
+                self.exit_stage = 3
                 return True
         
         return False
@@ -437,6 +508,7 @@ class TrendFollowingStrategy:
             
             timestamp = row.name if isinstance(row.name, datetime) else datetime.fromtimestamp(row.name / 1000)
             current_price = row['close']
+            prev_price = prev_row['close']
             
             # 시장 상황에 따른 파라미터 동적 조정
             adjusted_params = self.adjust_parameters_based_on_market(data, i)
@@ -458,32 +530,49 @@ class TrendFollowingStrategy:
                 continue
             
             # 익절 확인
-            if self.check_take_profit(current_price, timestamp, ema10, ema20):
+            if self.check_take_profit(current_price, timestamp, ema10, ema20, prev_price):
                 continue
             
-            # EMA 정배열/역배열 확인 (더 약한 조건도 허용)
+            # EMA 정배열/역배열 확인
             ema_alignment = self.check_ema_alignment(ema10, ema20, ema50)
             
             # 포지션이 없는 경우 진입 조건 확인
             if self.position == 0:
                 # 돌파 확인
-                breakout = self.identify_range_breakout(data.iloc[i-10:i+1], lookback=breakout_lookback)
+                range_data = data.iloc[max(0, i-breakout_lookback-1):i]
+                breakout = self.identify_range_breakout(data.iloc[max(0, i-breakout_lookback-1):i+1], lookback=breakout_lookback)
                 
-                # 롱 포지션 진입 조건 (매우 완화됨)
-                if (ema10 > ema20 and breakout == 1):  # 단순히 10일 EMA가 20일 EMA보다 위에 있고 상방 돌파
-                    # 손절가 설정 (돌파 캔들의 저점)
+                # 롱 포지션 진입 조건 (원본 전략 적용)
+                if (ema_alignment == 1 and  # 10일, 20일, 50일 EMA 정배열
+                    self.check_adjustment(current_price, ema10, ema20, ema50, 1) and  # 조정 구간 확인 (10일 또는 20일 EMA 이탈)
+                    self.detect_sideways(data.iloc[max(0, i-10):i], lookback=5, threshold=sideways_threshold) and  # 횡보 구간 확인
+                    breakout == 1):  # 횡보 구간 상단 돌파
+                    
+                    # 1차 손절가 설정 (돌파 캔들의 저점)
                     stop_loss_price = min(row['low'], prev_row['low'])
                     
-                    # 진입
-                    self.enter_position(1, current_price, timestamp, stop_loss_price)
-                
-                # 숏 포지션 진입 조건 (매우 완화됨)
-                elif (ema10 < ema20 and breakout == -1):  # 단순히 10일 EMA가 20일 EMA보다 아래에 있고 하방 돌파
-                    # 손절가 설정 (돌파 캔들의 고점)
-                    stop_loss_price = max(row['high'], prev_row['high'])
+                    # 2차 손절가 설정 (횡보 구간의 하단)
+                    range_low = range_data['low'].min()
+                    secondary_stop_loss = range_low
                     
                     # 진입
-                    self.enter_position(-1, current_price, timestamp, stop_loss_price)
+                    self.enter_position(1, current_price, timestamp, stop_loss_price, secondary_stop_loss)
+                
+                # 숏 포지션 진입 조건 (원본 전략 적용)
+                elif (ema_alignment == -1 and  # 10일, 20일, 50일 EMA 역배열
+                     self.check_adjustment(current_price, ema10, ema20, ema50, -1) and  # 조정 구간 확인 (10일 또는 20일 EMA 상향 돌파)
+                     self.detect_sideways(data.iloc[max(0, i-10):i], lookback=5, threshold=sideways_threshold) and  # 횡보 구간 확인
+                     breakout == -1):  # 횡보 구간 하단 돌파
+                    
+                    # 1차 손절가 설정 (돌파 캔들의 고점)
+                    stop_loss_price = max(row['high'], prev_row['high'])
+                    
+                    # 2차 손절가 설정 (횡보 구간의 상단)
+                    range_high = range_data['high'].max()
+                    secondary_stop_loss = range_high
+                    
+                    # 진입
+                    self.enter_position(-1, current_price, timestamp, stop_loss_price, secondary_stop_loss)
             
             # 자본금 업데이트
             self.update_equity(current_price, timestamp)

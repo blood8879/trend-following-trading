@@ -1,0 +1,9 @@
+pandas>=1.0.0
+numpy>=1.18.0
+matplotlib>=3.1.0
+ccxt>=1.50.0
+python-binance>=1.0.15
+flask>=2.0.0
+flask-socketio>=5.0.0
+python-socketio>=5.0.0
+python-engineio>=4.0.0 
