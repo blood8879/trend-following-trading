@@ -11,6 +11,10 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from strategy import TrendFollowingStrategy
 from database import TradingDatabase
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # 로깅 설정
 logging.basicConfig(
@@ -780,21 +784,24 @@ class BinanceFuturesAutoTrader:
 
 
 if __name__ == "__main__":
-    # 설정 파일에서 API 키 읽기
+    # 설정 파일에서 설정 정보 읽기
     try:
         with open('config_futures.json', 'r') as f:
             config = json.load(f)
-            api_key = config.get('api_key')
-            api_secret = config.get('api_secret')
-            test_mode = config.get('test_mode', True)
-            max_trade_amount = config.get('max_trade_amount')
-            symbol = config.get('symbol', 'BTCUSDT')
-            timeframe = config.get('timeframe', '4h')
-            leverage = config.get('leverage', 3)
-            test_initial_capital = config.get('test_initial_capital', 10000)
+            
+        # .env 파일에서 API 키 로드
+        api_key = os.getenv('BINANCE_API_KEY') or config.get('api_key')
+        api_secret = os.getenv('BINANCE_API_SECRET') or config.get('api_secret')
+        
+        test_mode = config.get('test_mode', True)
+        max_trade_amount = config.get('max_trade_amount')
+        symbol = config.get('symbol', 'BTCUSDT')
+        timeframe = config.get('timeframe', '4h')
+        leverage = config.get('leverage', 3)
+        test_initial_capital = config.get('test_initial_capital', 10000)
             
         if not api_key or not api_secret:
-            raise ValueError("API 키가 설정되지 않았습니다.")
+            raise ValueError("API 키가 설정되지 않았습니다. .env 파일 또는 config_futures.json에서 설정하세요.")
         
         # 테스트 모드일 때 초기 자본금 설정
         initial_capital = test_initial_capital if test_mode else None
@@ -815,7 +822,7 @@ if __name__ == "__main__":
         trader.run(check_interval=300)
         
     except FileNotFoundError:
-        logger.error("config_futures.json 파일을 찾을 수 없습니다. API 키 설정이 필요합니다.")
+        logger.error("config_futures.json 파일을 찾을 수 없습니다. 설정 파일이 필요합니다.")
     except json.JSONDecodeError:
         logger.error("config_futures.json 파일 형식이 잘못되었습니다.")
     except ValueError as e:
