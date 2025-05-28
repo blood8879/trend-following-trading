@@ -10,6 +10,8 @@ import time
 from binance.client import Client
 import logging
 import re
+import requests
+import sqlite3
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +22,7 @@ class TradeMonitor:
     자동매매 시스템 모니터링 도구
     """
     
-    def __init__(self, api_key=None, api_secret=None, symbol='BTCUSDT'):
+    def __init__(self, api_key=None, api_secret=None, symbol='BTCUSDT', webhook_url=None):
         """
         초기화
         
@@ -28,6 +30,7 @@ class TradeMonitor:
             api_key (str): Binance API 키
             api_secret (str): Binance API 시크릿
             symbol (str): 모니터링할 심볼
+            webhook_url (str): Discord/Slack 웹훅 URL
         """
         self.symbol = symbol
         
@@ -51,6 +54,9 @@ class TradeMonitor:
         
         # 로그 파일 경로
         self.log_file = 'trading.log'
+        
+        self.webhook_url = webhook_url
+        self.last_check = datetime.now()
     
     def get_account_info(self):
         """
@@ -341,12 +347,130 @@ class TradeMonitor:
             print("\n모니터링 대시보드를 종료합니다.")
         except Exception as e:
             logger.error(f"대시보드 실행 중 오류: {e}")
+    
+    def check_system_health(self):
+        """시스템 상태 확인"""
+        try:
+            # 데이터베이스 연결 확인
+            conn = sqlite3.connect('trading.db')
+            cursor = conn.cursor()
+            
+            # 최근 1시간 내 활동 확인
+            one_hour_ago = datetime.now() - timedelta(hours=1)
+            cursor.execute("""
+                SELECT COUNT(*) FROM market_data 
+                WHERE timestamp > ?
+            """, (one_hour_ago,))
+            
+            recent_activity = cursor.fetchone()[0]
+            conn.close()
+            
+            if recent_activity == 0:
+                self.send_alert("⚠️ 경고: 1시간 동안 시장 데이터 업데이트가 없습니다!")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.send_alert(f"🚨 시스템 오류: {str(e)}")
+            return False
+    
+    def check_trading_activity(self):
+        """거래 활동 확인"""
+        try:
+            conn = sqlite3.connect('trading.db')
+            cursor = conn.cursor()
+            
+            # 최근 24시간 거래 내역
+            yesterday = datetime.now() - timedelta(days=1)
+            cursor.execute("""
+                SELECT COUNT(*), SUM(total_value) FROM trades 
+                WHERE timestamp > ? AND test_mode = 0
+            """, (yesterday,))
+            
+            trade_count, total_volume = cursor.fetchone()
+            total_volume = total_volume or 0
+            
+            # 현재 포지션 확인
+            cursor.execute("""
+                SELECT long_position, short_position, unrealized_pnl 
+                FROM positions 
+                ORDER BY timestamp DESC LIMIT 1
+            """)
+            
+            position_data = cursor.fetchone()
+            conn.close()
+            
+            if position_data:
+                long_pos, short_pos, pnl = position_data
+                
+                message = f"""
+📊 일일 거래 리포트
+• 거래 횟수: {trade_count}회
+• 거래량: {total_volume:.2f} USDT
+• 롱 포지션: {long_pos:.4f}
+• 숏 포지션: {short_pos:.4f}
+• 미실현 손익: {pnl:.2f} USDT
+                """
+                
+                self.send_alert(message)
+            
+        except Exception as e:
+            self.send_alert(f"거래 활동 확인 오류: {str(e)}")
+    
+    def send_alert(self, message):
+        """알림 전송 (Discord/Slack 웹훅)"""
+        if not self.webhook_url:
+            print(f"[{datetime.now()}] {message}")
+            return
+        
+        try:
+            payload = {
+                "content": f"🤖 **트레이딩 봇 알림**\n{message}",
+                "username": "Trading Bot"
+            }
+            
+            response = requests.post(self.webhook_url, json=payload)
+            if response.status_code == 204:
+                print(f"알림 전송 성공: {message}")
+            else:
+                print(f"알림 전송 실패: {response.status_code}")
+                
+        except Exception as e:
+            print(f"알림 전송 오류: {e}")
+    
+    def run_monitoring(self):
+        """모니터링 실행"""
+        print("트레이딩 모니터링 시작...")
+        
+        while True:
+            try:
+                # 시스템 상태 확인 (5분마다)
+                if (datetime.now() - self.last_check).total_seconds() >= 300:
+                    self.check_system_health()
+                    self.last_check = datetime.now()
+                
+                # 일일 리포트 (매일 오전 9시)
+                now = datetime.now()
+                if now.hour == 9 and now.minute == 0:
+                    self.check_trading_activity()
+                    time.sleep(60)  # 1분 대기로 중복 실행 방지
+                
+                time.sleep(30)  # 30초마다 체크
+                
+            except KeyboardInterrupt:
+                print("모니터링 중단됨")
+                break
+            except Exception as e:
+                print(f"모니터링 오류: {e}")
+                time.sleep(60)
 
 
 if __name__ == "__main__":
     try:
         # 모니터 객체 생성
-        monitor = TradeMonitor(symbol='BTCUSDT')
+        webhook_url = None  # "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+        monitor = TradeMonitor(symbol='BTCUSDT', webhook_url=webhook_url)
         
         # 명령줄 인터페이스
         while True:
@@ -356,6 +480,9 @@ if __name__ == "__main__":
             print("3. 거래 그래프 표시")
             print("4. 로그 요약 정보")
             print("5. 실시간 대시보드 실행")
+            print("6. 시스템 상태 확인")
+            print("7. 거래 활동 확인")
+            print("8. 모니터링 실행")
             print("0. 종료")
             
             choice = input("\n선택: ")
@@ -387,6 +514,18 @@ if __name__ == "__main__":
                 refresh = input("새로고침 주기(초, 기본값 60): ")
                 refresh_interval = int(refresh) if refresh.isdigit() else 60
                 monitor.run_dashboard(refresh_interval=refresh_interval)
+            
+            elif choice == '6':
+                if monitor.check_system_health():
+                    print("\n시스템 상태: 정상")
+                else:
+                    print("\n시스템 상태: 비정상")
+            
+            elif choice == '7':
+                monitor.check_trading_activity()
+            
+            elif choice == '8':
+                monitor.run_monitoring()
             
             elif choice == '0':
                 print("\n프로그램을 종료합니다.")

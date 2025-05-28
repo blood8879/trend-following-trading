@@ -6,6 +6,9 @@ import json
 from datetime import datetime
 from typing import List, Dict, Optional
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TradingDatabase:
     """
@@ -21,6 +24,21 @@ class TradingDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
+            # 기존 positions 테이블 스키마 확인 및 마이그레이션
+            try:
+                cursor.execute("PRAGMA table_info(positions)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'position' in columns:
+                    # position 컬럼이 NOT NULL로 설정되어 있는지 확인
+                    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'")
+                    table_schema = cursor.fetchone()
+                    if table_schema and 'position INTEGER NOT NULL' in table_schema[0]:
+                        # 기존 테이블을 백업하고 새로 생성
+                        cursor.execute("ALTER TABLE positions RENAME TO positions_backup")
+                        logger.info("기존 positions 테이블을 백업했습니다.")
+            except sqlite3.OperationalError:
+                pass  # 테이블이 존재하지 않음
+            
             # 매매 내역 테이블
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS trades (
@@ -32,7 +50,9 @@ class TradingDatabase:
                     price REAL NOT NULL,
                     total_value REAL NOT NULL,
                     order_id TEXT,
-                    trade_type TEXT,  -- ENTRY, EXIT, STOP_LOSS
+                    trade_type TEXT,  -- ENTRY, EXIT, STOP_LOSS, ENTRY_LONG, ENTRY_SHORT, EXIT_LONG, EXIT_SHORT
+                    position_side TEXT,  -- LONG, SHORT, BOTH (선물용)
+                    leverage INTEGER DEFAULT 1,  -- 레버리지 (선물용)
                     exit_stage INTEGER DEFAULT 0,  -- 0: 진입, 1: 1차익절, 2: 2차익절, 3: 3차익절
                     stop_loss_price REAL,
                     secondary_stop_loss_price REAL,
@@ -41,19 +61,28 @@ class TradingDatabase:
                 )
             ''')
             
-            # 포지션 상태 테이블
+            # 포지션 상태 테이블 (선물용 확장)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS positions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp DATETIME NOT NULL,
                     symbol TEXT NOT NULL,
-                    position INTEGER NOT NULL,  -- 0: 없음, 1: 롱, -1: 숏
-                    entry_price REAL,
-                    position_size REAL,
-                    stop_loss REAL,
-                    secondary_stop_loss REAL,
+                    position INTEGER DEFAULT 0,  -- 0: 없음, 1: 롱, -1: 숏 (호환성용, NOT NULL 제거)
+                    long_position REAL DEFAULT 0,  -- 롱 포지션 크기 (선물용)
+                    short_position REAL DEFAULT 0,  -- 숏 포지션 크기 (선물용)
+                    entry_price REAL,  -- 기존 호환성용
+                    long_entry_price REAL DEFAULT 0,  -- 롱 진입가 (선물용)
+                    short_entry_price REAL DEFAULT 0,  -- 숏 진입가 (선물용)
+                    position_size REAL,  -- 기존 호환성용
+                    stop_loss REAL,  -- 기존 호환성용
+                    long_stop_loss REAL DEFAULT 0,  -- 롱 손절가 (선물용)
+                    short_stop_loss REAL DEFAULT 0,  -- 숏 손절가 (선물용)
+                    secondary_stop_loss REAL,  -- 기존 호환성용
+                    long_secondary_stop_loss REAL DEFAULT 0,  -- 롱 2차 손절가 (선물용)
+                    short_secondary_stop_loss REAL DEFAULT 0,  -- 숏 2차 손절가 (선물용)
                     unrealized_pnl REAL,
-                    current_price REAL
+                    current_price REAL,
+                    leverage INTEGER DEFAULT 1  -- 레버리지 (선물용)
                 )
             ''')
             
@@ -90,6 +119,29 @@ class TradingDatabase:
                 )
             ''')
             
+            # 기존 테이블에 새 컬럼 추가 (마이그레이션)
+            try:
+                cursor.execute('ALTER TABLE trades ADD COLUMN position_side TEXT')
+            except sqlite3.OperationalError:
+                pass  # 컬럼이 이미 존재함
+            
+            try:
+                cursor.execute('ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1')
+            except sqlite3.OperationalError:
+                pass  # 컬럼이 이미 존재함
+            
+            # 포지션 테이블에 선물용 컬럼들 추가
+            for column in ['long_position', 'short_position', 'long_entry_price', 'short_entry_price',
+                          'long_stop_loss', 'short_stop_loss', 'long_secondary_stop_loss', 
+                          'short_secondary_stop_loss', 'leverage']:
+                try:
+                    if 'leverage' in column:
+                        cursor.execute(f'ALTER TABLE positions ADD COLUMN {column} INTEGER DEFAULT 1')
+                    else:
+                        cursor.execute(f'ALTER TABLE positions ADD COLUMN {column} REAL DEFAULT 0')
+                except sqlite3.OperationalError:
+                    pass  # 컬럼이 이미 존재함
+            
             conn.commit()
     
     def add_trade(self, trade_data: Dict) -> int:
@@ -100,9 +152,9 @@ class TradingDatabase:
             cursor.execute('''
                 INSERT INTO trades (
                     timestamp, symbol, side, quantity, price, total_value,
-                    order_id, trade_type, exit_stage, stop_loss_price,
-                    secondary_stop_loss_price, test_mode, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    order_id, trade_type, position_side, leverage, exit_stage, 
+                    stop_loss_price, secondary_stop_loss_price, test_mode, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 trade_data.get('timestamp', datetime.now()),
                 trade_data.get('symbol'),
@@ -112,6 +164,8 @@ class TradingDatabase:
                 trade_data.get('total_value'),
                 trade_data.get('order_id'),
                 trade_data.get('trade_type'),
+                trade_data.get('position_side'),
+                trade_data.get('leverage', 1),
                 trade_data.get('exit_stage', 0),
                 trade_data.get('stop_loss_price'),
                 trade_data.get('secondary_stop_loss_price'),
@@ -130,19 +184,31 @@ class TradingDatabase:
             
             cursor.execute('''
                 INSERT INTO positions (
-                    timestamp, symbol, position, entry_price, position_size,
-                    stop_loss, secondary_stop_loss, unrealized_pnl, current_price
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    timestamp, symbol, position, long_position, short_position,
+                    entry_price, long_entry_price, short_entry_price, position_size,
+                    stop_loss, long_stop_loss, short_stop_loss, secondary_stop_loss,
+                    long_secondary_stop_loss, short_secondary_stop_loss,
+                    unrealized_pnl, current_price, leverage
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 position_data.get('timestamp', datetime.now()),
                 position_data.get('symbol'),
-                position_data.get('position'),
+                position_data.get('position', 0),
+                position_data.get('long_position', 0),
+                position_data.get('short_position', 0),
                 position_data.get('entry_price'),
+                position_data.get('long_entry_price', 0),
+                position_data.get('short_entry_price', 0),
                 position_data.get('position_size'),
                 position_data.get('stop_loss'),
+                position_data.get('long_stop_loss', 0),
+                position_data.get('short_stop_loss', 0),
                 position_data.get('secondary_stop_loss'),
+                position_data.get('long_secondary_stop_loss', 0),
+                position_data.get('short_secondary_stop_loss', 0),
                 position_data.get('unrealized_pnl'),
-                position_data.get('current_price')
+                position_data.get('current_price'),
+                position_data.get('leverage', 1)
             ))
             
             conn.commit()

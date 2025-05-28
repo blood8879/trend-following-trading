@@ -4,5 +4,6 @@
   "test_mode": true,
   "max_trade_amount": 100,
   "symbol": "BTCUSDT",
-  "timeframe": "4h"
+  "timeframe": "4h",
+  "test_initial_capital": 10000
 }

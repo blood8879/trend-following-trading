@@ -65,11 +65,16 @@ class BinanceAutoTrader:
         
         # 초기 자본금 설정
         if initial_capital is None:
-            # USDT 잔고 확인
-            for balance in account_info['balances']:
-                if balance['asset'] == self.quote_asset:
-                    self.initial_capital = float(balance['free'])
-                    break
+            if self.test_mode:
+                # 테스트 모드에서는 설정 파일의 test_initial_capital 사용 또는 기본값
+                self.initial_capital = 10000  # 기본값
+            else:
+                # 실제 계정 잔고 사용
+                # USDT 잔고 확인
+                for balance in account_info['balances']:
+                    if balance['asset'] == self.quote_asset:
+                        self.initial_capital = float(balance['free'])
+                        break
         else:
             self.initial_capital = initial_capital
         
@@ -681,8 +686,15 @@ class BinanceAutoTrader:
     def _save_market_data_to_db(self, candle, ema10, ema20, ema50):
         """시장 데이터를 데이터베이스에 저장"""
         try:
+            # Timestamp를 datetime 문자열로 변환
+            timestamp = candle.name
+            if hasattr(timestamp, 'strftime'):
+                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                timestamp_str = str(timestamp)
+            
             market_data = {
-                'timestamp': candle.name,  # 인덱스가 타임스탬프
+                'timestamp': timestamp_str,
                 'symbol': self.symbol,
                 'timeframe': self.timeframe,
                 'open_price': float(candle['open']),
@@ -741,9 +753,13 @@ if __name__ == "__main__":
             max_trade_amount = config.get('max_trade_amount')  # 거래당 최대 금액
             symbol = config.get('symbol', 'BTCUSDT')  # 거래 심볼
             timeframe = config.get('timeframe', '4h')  # 캔들 주기
+            test_initial_capital = config.get('test_initial_capital', 10000)
             
         if not api_key or not api_secret:
             raise ValueError("API 키가 설정되지 않았습니다.")
+        
+        # 테스트 모드일 때 초기 자본금 설정
+        initial_capital = test_initial_capital if test_mode else None
             
         # 자동 매매 시스템 초기화
         trader = BinanceAutoTrader(
@@ -751,6 +767,7 @@ if __name__ == "__main__":
             api_secret=api_secret,
             symbol=symbol,
             timeframe=timeframe,
+            initial_capital=initial_capital,
             max_trade_amount=max_trade_amount,
             test_mode=test_mode
         )

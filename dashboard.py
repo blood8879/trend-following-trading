@@ -1,118 +1,306 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from flask import Flask, render_template, jsonify, request
-from flask_socketio import SocketIO, emit
-import json
+import dash
+from dash import dcc, html, dash_table
+from dash.dependencies import Input, Output
+import plotly.graph_objs as go
+import plotly.express as px
+import pandas as pd
+import sqlite3
 from datetime import datetime, timedelta
-import threading
-import time
-from database import TradingDatabase
+import json
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'trading_dashboard_secret_key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+# 데이터베이스 연결
+def get_db_connection():
+    return sqlite3.connect('trading.db')
 
-# 데이터베이스 인스턴스
-db = TradingDatabase()
+# 매매 내역 조회
+def get_trades_data():
+    conn = get_db_connection()
+    query = """
+    SELECT timestamp, symbol, side, quantity, price, total_value, 
+           trade_type, position_side, leverage, test_mode
+    FROM trades 
+    ORDER BY timestamp DESC 
+    LIMIT 100
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
 
-class DashboardManager:
-    """대시보드 관리 클래스"""
+# 포지션 내역 조회
+def get_positions_data():
+    conn = get_db_connection()
+    query = """
+    SELECT timestamp, symbol, long_position, short_position, 
+           long_entry_price, short_entry_price, unrealized_pnl, current_price
+    FROM positions 
+    ORDER BY timestamp DESC 
+    LIMIT 100
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
+
+# 계정 상태 조회
+def get_account_data():
+    conn = get_db_connection()
+    query = """
+    SELECT timestamp, total_balance, available_balance, total_pnl
+    FROM account_status 
+    ORDER BY timestamp DESC 
+    LIMIT 100
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
+
+# 시장 데이터 조회
+def get_market_data():
+    conn = get_db_connection()
+    query = """
+    SELECT timestamp, close_price, ema10, ema20, ema50, volume
+    FROM market_data 
+    ORDER BY timestamp DESC 
+    LIMIT 200
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
+
+# Dash 앱 초기화
+app = dash.Dash(__name__)
+app.title = "선물 자동매매 대시보드"
+
+# 레이아웃 정의
+app.layout = html.Div([
+    html.H1("🚀 선물 자동매매 대시보드", style={'textAlign': 'center', 'color': '#2c3e50'}),
     
-    def __init__(self):
-        self.is_running = False
-        self.update_thread = None
+    # 새로고침 간격 설정
+    dcc.Interval(
+        id='interval-component',
+        interval=30*1000,  # 30초마다 업데이트
+        n_intervals=0
+    ),
     
-    def start_real_time_updates(self):
-        """실시간 업데이트 시작"""
-        if not self.is_running:
-            self.is_running = True
-            self.update_thread = threading.Thread(target=self._update_loop)
-            self.update_thread.daemon = True
-            self.update_thread.start()
+    # 상단 요약 카드
+    html.Div([
+        html.Div([
+            html.H3("총 잔고", style={'color': '#3498db'}),
+            html.H2(id='total-balance', style={'color': '#2c3e50'})
+        ], className='summary-card', style={'width': '23%', 'display': 'inline-block', 'margin': '1%', 'padding': '20px', 'backgroundColor': '#ecf0f1', 'borderRadius': '10px'}),
+        
+        html.Div([
+            html.H3("미실현 손익", style={'color': '#e74c3c'}),
+            html.H2(id='unrealized-pnl', style={'color': '#2c3e50'})
+        ], className='summary-card', style={'width': '23%', 'display': 'inline-block', 'margin': '1%', 'padding': '20px', 'backgroundColor': '#ecf0f1', 'borderRadius': '10px'}),
+        
+        html.Div([
+            html.H3("롱 포지션", style={'color': '#27ae60'}),
+            html.H2(id='long-position', style={'color': '#2c3e50'})
+        ], className='summary-card', style={'width': '23%', 'display': 'inline-block', 'margin': '1%', 'padding': '20px', 'backgroundColor': '#ecf0f1', 'borderRadius': '10px'}),
+        
+        html.Div([
+            html.H3("숏 포지션", style={'color': '#e67e22'}),
+            html.H2(id='short-position', style={'color': '#2c3e50'})
+        ], className='summary-card', style={'width': '23%', 'display': 'inline-block', 'margin': '1%', 'padding': '20px', 'backgroundColor': '#ecf0f1', 'borderRadius': '10px'})
+    ]),
     
-    def stop_real_time_updates(self):
-        """실시간 업데이트 중지"""
-        self.is_running = False
-        if self.update_thread:
-            self.update_thread.join()
+    # 차트 섹션
+    html.Div([
+        html.Div([
+            html.H3("가격 차트 & EMA", style={'textAlign': 'center'}),
+            dcc.Graph(id='price-chart')
+        ], style={'width': '50%', 'display': 'inline-block'}),
+        
+        html.Div([
+            html.H3("손익 추이", style={'textAlign': 'center'}),
+            dcc.Graph(id='pnl-chart')
+        ], style={'width': '50%', 'display': 'inline-block'})
+    ]),
     
-    def _update_loop(self):
-        """실시간 업데이트 루프"""
-        while self.is_running:
-            try:
-                # 최신 데이터 가져오기
-                recent_trades = db.get_recent_trades(limit=10)
-                account_summary = db.get_account_summary()
-                
-                # 클라이언트에 데이터 전송
-                socketio.emit('trades_update', recent_trades)
-                socketio.emit('account_update', account_summary)
-                
-                time.sleep(5)  # 5초마다 업데이트
-                
-            except Exception as e:
-                print(f"실시간 업데이트 오류: {e}")
-                time.sleep(10)
+    # 매매 내역 테이블
+    html.Div([
+        html.H3("최근 매매 내역", style={'textAlign': 'center', 'marginTop': '30px'}),
+        dash_table.DataTable(
+            id='trades-table',
+            columns=[
+                {'name': '시간', 'id': 'timestamp'},
+                {'name': '심볼', 'id': 'symbol'},
+                {'name': '방향', 'id': 'side'},
+                {'name': '수량', 'id': 'quantity', 'type': 'numeric', 'format': {'specifier': '.4f'}},
+                {'name': '가격', 'id': 'price', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+                {'name': '총액', 'id': 'total_value', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+                {'name': '타입', 'id': 'trade_type'},
+                {'name': '포지션', 'id': 'position_side'},
+                {'name': '테스트', 'id': 'test_mode'}
+            ],
+            style_cell={'textAlign': 'center'},
+            style_data_conditional=[
+                {
+                    'if': {'filter_query': '{side} = BUY'},
+                    'backgroundColor': '#d5f4e6',
+                    'color': 'black',
+                },
+                {
+                    'if': {'filter_query': '{side} = SELL'},
+                    'backgroundColor': '#ffeaa7',
+                    'color': 'black',
+                }
+            ],
+            page_size=10
+        )
+    ], style={'margin': '20px'})
+])
 
-dashboard_manager = DashboardManager()
+# 콜백 함수들
+@app.callback(
+    [Output('total-balance', 'children'),
+     Output('unrealized-pnl', 'children'),
+     Output('long-position', 'children'),
+     Output('short-position', 'children')],
+    [Input('interval-component', 'n_intervals')]
+)
+def update_summary_cards(n):
+    try:
+        # 계정 데이터
+        account_df = get_account_data()
+        if not account_df.empty:
+            total_balance = f"{account_df.iloc[0]['total_balance']:.2f} USDT"
+        else:
+            total_balance = "0.00 USDT"
+        
+        # 포지션 데이터
+        positions_df = get_positions_data()
+        if not positions_df.empty:
+            latest_position = positions_df.iloc[0]
+            unrealized_pnl = f"{latest_position['unrealized_pnl']:.2f} USDT"
+            long_pos = f"{latest_position['long_position']:.4f}"
+            short_pos = f"{latest_position['short_position']:.4f}"
+        else:
+            unrealized_pnl = "0.00 USDT"
+            long_pos = "0.0000"
+            short_pos = "0.0000"
+        
+        return total_balance, unrealized_pnl, long_pos, short_pos
+    except:
+        return "N/A", "N/A", "N/A", "N/A"
 
-@app.route('/')
-def index():
-    """메인 대시보드 페이지"""
-    return render_template('dashboard.html')
+@app.callback(
+    Output('price-chart', 'figure'),
+    [Input('interval-component', 'n_intervals')]
+)
+def update_price_chart(n):
+    try:
+        df = get_market_data()
+        if df.empty:
+            return go.Figure()
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values('timestamp')
+        
+        fig = go.Figure()
+        
+        # 가격 라인
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['close_price'],
+            mode='lines',
+            name='가격',
+            line=dict(color='#3498db', width=2)
+        ))
+        
+        # EMA 라인들
+        if 'ema10' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df['timestamp'],
+                y=df['ema10'],
+                mode='lines',
+                name='EMA10',
+                line=dict(color='#e74c3c', width=1)
+            ))
+        
+        if 'ema20' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df['timestamp'],
+                y=df['ema20'],
+                mode='lines',
+                name='EMA20',
+                line=dict(color='#f39c12', width=1)
+            ))
+        
+        if 'ema50' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df['timestamp'],
+                y=df['ema50'],
+                mode='lines',
+                name='EMA50',
+                line=dict(color='#27ae60', width=1)
+            ))
+        
+        fig.update_layout(
+            title="가격 & EMA 차트",
+            xaxis_title="시간",
+            yaxis_title="가격 (USDT)",
+            hovermode='x unified'
+        )
+        
+        return fig
+    except:
+        return go.Figure()
 
-@app.route('/api/trades')
-def get_trades():
-    """매매 내역 API"""
-    limit = request.args.get('limit', 50, type=int)
-    trades = db.get_recent_trades(limit=limit)
-    return jsonify(trades)
+@app.callback(
+    Output('pnl-chart', 'figure'),
+    [Input('interval-component', 'n_intervals')]
+)
+def update_pnl_chart(n):
+    try:
+        df = get_account_data()
+        if df.empty:
+            return go.Figure()
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values('timestamp')
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['total_pnl'],
+            mode='lines+markers',
+            name='총 손익',
+            line=dict(color='#9b59b6', width=2),
+            fill='tonexty'
+        ))
+        
+        fig.update_layout(
+            title="손익 추이",
+            xaxis_title="시간",
+            yaxis_title="손익 (USDT)",
+            hovermode='x unified'
+        )
+        
+        return fig
+    except:
+        return go.Figure()
 
-@app.route('/api/account')
-def get_account():
-    """계정 정보 API"""
-    account_summary = db.get_account_summary()
-    return jsonify(account_summary)
-
-@app.route('/api/position/<symbol>')
-def get_position(symbol):
-    """포지션 정보 API"""
-    position = db.get_current_position(symbol)
-    return jsonify(position)
-
-@app.route('/api/chart/<symbol>/<timeframe>')
-def get_chart_data(symbol, timeframe):
-    """차트 데이터 API"""
-    limit = request.args.get('limit', 100, type=int)
-    chart_data = db.get_market_data_for_chart(symbol, timeframe, limit)
-    return jsonify(chart_data)
-
-@app.route('/api/pnl')
-def get_pnl_history():
-    """손익 히스토리 API"""
-    days = request.args.get('days', 30, type=int)
-    pnl_data = db.get_pnl_history(days)
-    return jsonify(pnl_data)
-
-@socketio.on('connect')
-def handle_connect():
-    """클라이언트 연결 시"""
-    print('클라이언트가 연결되었습니다.')
-    dashboard_manager.start_real_time_updates()
-    
-    # 초기 데이터 전송
-    recent_trades = db.get_recent_trades(limit=10)
-    account_summary = db.get_account_summary()
-    
-    emit('trades_update', recent_trades)
-    emit('account_update', account_summary)
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    """클라이언트 연결 해제 시"""
-    print('클라이언트가 연결을 해제했습니다.')
+@app.callback(
+    Output('trades-table', 'data'),
+    [Input('interval-component', 'n_intervals')]
+)
+def update_trades_table(n):
+    try:
+        df = get_trades_data()
+        if df.empty:
+            return []
+        
+        # 시간 포맷팅
+        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%m-%d %H:%M')
+        
+        return df.to_dict('records')
+    except:
+        return []
 
 if __name__ == '__main__':
-    # 개발 서버 실행
-    socketio.run(app, debug=True, host='0.0.0.0', port=8080) 
+    app.run_server(host='0.0.0.0', port=8050, debug=False) 

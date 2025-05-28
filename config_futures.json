@@ -1,0 +1,10 @@
+{
+  "api_key": "KHbytNQQSZOzU0nYxMiaKFljXzvXJrdHzAWSQOCX0fqnOV1O0mx3HPxhI9Bipfns",
+  "api_secret": "QIEuhJevlTdsZyhwNYMuGWNakuRMEVNaCKkBnonTqYsoAVu25TFZhnZMRblykSWp",
+  "symbol": "BTCUSDT",
+  "timeframe": "4h",
+  "leverage": 25,
+  "max_trade_amount": 2000,
+  "test_mode": true,
+  "test_initial_capital": 10000
+}
