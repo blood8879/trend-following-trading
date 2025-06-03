@@ -154,6 +154,14 @@ class BinanceFuturesAutoTrader:
             'short_trades': 0,
             'winning_trades': 0,
             'losing_trades': 0,
+            'long_entry_count': 0,        # 롱 진입 횟수
+            'short_entry_count': 0,       # 숏 진입 횟수
+            'long_wins': 0,               # 롱 승리 횟수
+            'long_losses': 0,             # 롱 패배 횟수
+            'short_wins': 0,              # 숏 승리 횟수
+            'short_losses': 0,            # 숏 패배 횟수
+            'long_win_rate': 0,           # 롱 승률
+            'short_win_rate': 0,          # 숏 승률
             'total_profit': 0,
             'long_profit': 0,
             'short_profit': 0,
@@ -432,11 +440,13 @@ class BinanceFuturesAutoTrader:
                 # 롱 진입 시 현재 포지션 정보 업데이트
                 self.current_market_state['long_entry_price'] = price
                 self.trade_stats['long_trades'] += 1
+                self.trade_stats['long_entry_count'] += 1
             elif side == 'SELL' and position_side == 'SHORT':
                 trade_type = "SHORT 진입"
                 # 숏 진입 시 현재 포지션 정보 업데이트
                 self.current_market_state['short_entry_price'] = price
                 self.trade_stats['short_trades'] += 1
+                self.trade_stats['short_entry_count'] += 1
             elif side == 'SELL' and position_side == 'LONG':
                 trade_type = "LONG 청산"
                 # 롱 청산 시 수익률 계산
@@ -493,19 +503,54 @@ class BinanceFuturesAutoTrader:
             
             trade_logger.info(close_message)
             
+            # 롱/숏별 승률 계산
+            self.trade_stats['long_win_rate'] = (
+                (self.trade_stats['long_wins'] / (self.trade_stats['long_wins'] + self.trade_stats['long_losses'])) * 100
+                if (self.trade_stats['long_wins'] + self.trade_stats['long_losses']) > 0 else 0
+            )
+            self.trade_stats['short_win_rate'] = (
+                (self.trade_stats['short_wins'] / (self.trade_stats['short_wins'] + self.trade_stats['short_losses'])) * 100
+                if (self.trade_stats['short_wins'] + self.trade_stats['short_losses']) > 0 else 0
+            )
+            
             # 통계 요약 로그 (매 거래 후)
             if self.trade_stats['total_trades'] > 0:
                 win_rate = (self.trade_stats['winning_trades'] / self.trade_stats['total_trades']) * 100
+                long_return = ((self.trade_stats['long_profit'] / self.initial_capital) * 100) if self.initial_capital > 0 else 0
+                short_return = ((self.trade_stats['short_profit'] / self.initial_capital) * 100) if self.initial_capital > 0 else 0
+                total_return = ((self.trade_stats['current_balance'] - self.initial_capital) / self.initial_capital) * 100
+                
                 summary_message = (
                     f"[거래통계] "
                     f"총 거래: {self.trade_stats['total_trades']}회 | "
-                    f"롱: {self.trade_stats['long_trades']}회 | "
-                    f"숏: {self.trade_stats['short_trades']}회 | "
-                    f"승률: {win_rate:.1f}% | "
+                    f"전체 승률: {win_rate:.1f}% | "
                     f"총손익: {self.trade_stats['total_profit']:+,.2f} USDT | "
-                    f"수익률: {((self.trade_stats['current_balance'] - self.initial_capital) / self.initial_capital) * 100:+.2f}%"
+                    f"수익률: {total_return:+.2f}%"
                 )
+                
+                long_stats = (
+                    f"[롱통계] "
+                    f"진입: {self.trade_stats['long_entry_count']}회 | "
+                    f"승: {self.trade_stats['long_wins']}회 | "
+                    f"패: {self.trade_stats['long_losses']}회 | "
+                    f"승률: {self.trade_stats['long_win_rate']:.1f}% | "
+                    f"손익: {self.trade_stats['long_profit']:+,.2f} USDT | "
+                    f"수익률: {long_return:+.2f}%"
+                )
+                
+                short_stats = (
+                    f"[숏통계] "
+                    f"진입: {self.trade_stats['short_entry_count']}회 | "
+                    f"승: {self.trade_stats['short_wins']}회 | "
+                    f"패: {self.trade_stats['short_losses']}회 | "
+                    f"승률: {self.trade_stats['short_win_rate']:.1f}% | "
+                    f"손익: {self.trade_stats['short_profit']:+,.2f} USDT | "
+                    f"수익률: {short_return:+.2f}%"
+                )
+                
                 trade_logger.info(summary_message)
+                trade_logger.info(long_stats)
+                trade_logger.info(short_stats)
                 trade_logger.info("-" * 100)
             
         except Exception as e:
@@ -521,8 +566,16 @@ class BinanceFuturesAutoTrader:
             # 포지션별 손익 업데이트
             if position_type == 'LONG':
                 self.trade_stats['long_profit'] += profit
+                if profit > 0:
+                    self.trade_stats['long_wins'] += 1
+                else:
+                    self.trade_stats['long_losses'] += 1
             else:
                 self.trade_stats['short_profit'] += profit
+                if profit > 0:
+                    self.trade_stats['short_wins'] += 1
+                else:
+                    self.trade_stats['short_losses'] += 1
             
             # 승/패 카운트
             if profit > 0:
@@ -959,18 +1012,53 @@ class BinanceFuturesAutoTrader:
                 else:
                     profit_loss_ratio = 0
                 
+                # 롱/숏별 승률 계산
+                long_win_rate = (
+                    (self.trade_stats['long_wins'] / (self.trade_stats['long_wins'] + self.trade_stats['long_losses'])) * 100
+                    if (self.trade_stats['long_wins'] + self.trade_stats['long_losses']) > 0 else 0
+                )
+                short_win_rate = (
+                    (self.trade_stats['short_wins'] / (self.trade_stats['short_wins'] + self.trade_stats['short_losses'])) * 100
+                    if (self.trade_stats['short_wins'] + self.trade_stats['short_losses']) > 0 else 0
+                )
+                
+                # 롱/숏별 수익률 계산
+                long_return_rate = (self.trade_stats['long_profit'] / self.initial_capital) * 100 if self.initial_capital > 0 else 0
+                short_return_rate = (self.trade_stats['short_profit'] / self.initial_capital) * 100 if self.initial_capital > 0 else 0
+                
+                # 롱/숏별 평균 손익
+                avg_long_profit = self.trade_stats['long_profit'] / (self.trade_stats['long_wins'] + self.trade_stats['long_losses']) if (self.trade_stats['long_wins'] + self.trade_stats['long_losses']) > 0 else 0
+                avg_short_profit = self.trade_stats['short_profit'] / (self.trade_stats['short_wins'] + self.trade_stats['short_losses']) if (self.trade_stats['short_wins'] + self.trade_stats['short_losses']) > 0 else 0
+
                 final_stats = f"""
 === 최종 거래 통계 ===
+🔸 전체 통계
 총 거래 횟수: {self.trade_stats['total_trades']}회
-롱 거래: {self.trade_stats['long_trades']}회 | 숏 거래: {self.trade_stats['short_trades']}회
-승리: {self.trade_stats['winning_trades']}회 | 패배: {self.trade_stats['losing_trades']}회
-승률: {win_rate:.1f}%
+전체 승리: {self.trade_stats['winning_trades']}회 | 전체 패배: {self.trade_stats['losing_trades']}회
+전체 승률: {win_rate:.1f}%
 총 손익: {self.trade_stats['total_profit']:+,.2f} USDT
-롱 손익: {self.trade_stats['long_profit']:+,.2f} USDT | 숏 손익: {self.trade_stats['short_profit']:+,.2f} USDT
-수익률: {total_return:+.2f}%
+총 수익률: {total_return:+.2f}%
 평균 거래당 손익: {avg_profit:+,.2f} USDT
 손익비: {profit_loss_ratio:.2f}
 최대 드로우다운: {self.trade_stats['max_drawdown']:,.2f} USDT
+
+🟢 롱 포지션 통계  
+롱 진입 횟수: {self.trade_stats['long_entry_count']}회
+롱 승리: {self.trade_stats['long_wins']}회 | 롱 패배: {self.trade_stats['long_losses']}회
+롱 승률: {long_win_rate:.1f}%
+롱 손익: {self.trade_stats['long_profit']:+,.2f} USDT
+롱 수익률: {long_return_rate:+.2f}%
+롱 평균 손익: {avg_long_profit:+,.2f} USDT
+
+🔴 숏 포지션 통계
+숏 진입 횟수: {self.trade_stats['short_entry_count']}회  
+숏 승리: {self.trade_stats['short_wins']}회 | 숏 패배: {self.trade_stats['short_losses']}회
+숏 승률: {short_win_rate:.1f}%
+숏 손익: {self.trade_stats['short_profit']:+,.2f} USDT
+숏 수익률: {short_return_rate:+.2f}%
+숏 평균 손익: {avg_short_profit:+,.2f} USDT
+
+💰 잔고 변화
 초기 잔고: {self.initial_capital:,.2f} USDT → 최종 잔고: {self.trade_stats['current_balance']:,.2f} USDT
 =========================================="""
                 
