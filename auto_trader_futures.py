@@ -27,6 +27,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 거래 결과 전용 로거 설정
+trade_logger = logging.getLogger('trade_result_logger')
+trade_logger.setLevel(logging.INFO)
+trade_handler = logging.FileHandler("futures_trading_result.log")
+trade_formatter = logging.Formatter('%(asctime)s - %(message)s')
+trade_handler.setFormatter(trade_formatter)
+trade_logger.addHandler(trade_handler)
+trade_logger.propagate = False  # 부모 로거로 전파 방지
+
 class BinanceFuturesAutoTrader:
     """
     Binance 선물 자동매매 클래스
@@ -136,6 +145,20 @@ class BinanceFuturesAutoTrader:
             'short_stop_loss': 0,    # 숏 손절가
             'long_secondary_stop_loss': 0,   # 롱 2차 손절가
             'short_secondary_stop_loss': 0   # 숏 2차 손절가
+        }
+        
+        # 거래 통계 추적
+        self.trade_stats = {
+            'total_trades': 0,
+            'long_trades': 0,
+            'short_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_profit': 0,
+            'long_profit': 0,
+            'short_profit': 0,
+            'max_drawdown': 0,
+            'current_balance': self.initial_capital
         }
         
         # 안전 설정 확인
@@ -326,6 +349,9 @@ class BinanceFuturesAutoTrader:
                 # 테스트 모드에서도 데이터베이스에 매매 내역 저장
                 self._save_trade_to_db(test_order, side, quantity, current_price, position_side)
                 
+                # 거래 로그 기록
+                self._log_trade_execution(test_order, side, quantity, current_price, position_side)
+                
                 return test_order
             
             # 실제 선물 주문 실행
@@ -343,6 +369,9 @@ class BinanceFuturesAutoTrader:
             
             # 데이터베이스에 매매 내역 저장
             self._save_trade_to_db(order, side, quantity, current_price, position_side)
+            
+            # 거래 로그 기록
+            self._log_trade_execution(order, side, quantity, current_price, position_side)
             
             return order
             
@@ -390,6 +419,124 @@ class BinanceFuturesAutoTrader:
             
         except Exception as e:
             logger.error(f"선물 매매 내역 저장 중 오류: {e}")
+    
+    def _log_trade_execution(self, order, side, quantity, price, position_side):
+        """거래 실행 로그 기록"""
+        try:
+            order_id = order.get('orderId', 'TEST') if order else 'TEST'
+            total_value = quantity * price
+            
+            # 거래 타입 결정
+            if side == 'BUY' and position_side == 'LONG':
+                trade_type = "LONG 진입"
+                # 롱 진입 시 현재 포지션 정보 업데이트
+                self.current_market_state['long_entry_price'] = price
+                self.trade_stats['long_trades'] += 1
+            elif side == 'SELL' and position_side == 'SHORT':
+                trade_type = "SHORT 진입"
+                # 숏 진입 시 현재 포지션 정보 업데이트
+                self.current_market_state['short_entry_price'] = price
+                self.trade_stats['short_trades'] += 1
+            elif side == 'SELL' and position_side == 'LONG':
+                trade_type = "LONG 청산"
+                # 롱 청산 시 수익률 계산
+                entry_price = self.current_market_state.get('long_entry_price', 0)
+                if entry_price > 0:
+                    profit = (price - entry_price) * quantity
+                    profit_rate = ((price - entry_price) / entry_price) * 100 * self.leverage
+                    self._log_position_close('LONG', entry_price, price, quantity, profit, profit_rate)
+                    self._update_trade_stats(profit, 'LONG')
+                return
+            elif side == 'BUY' and position_side == 'SHORT':
+                trade_type = "SHORT 청산"
+                # 숏 청산 시 수익률 계산
+                entry_price = self.current_market_state.get('short_entry_price', 0)
+                if entry_price > 0:
+                    profit = (entry_price - price) * quantity
+                    profit_rate = ((entry_price - price) / entry_price) * 100 * self.leverage
+                    self._log_position_close('SHORT', entry_price, price, quantity, profit, profit_rate)
+                    self._update_trade_stats(profit, 'SHORT')
+                return
+            
+            # 진입 로그 기록
+            trade_message = (
+                f"[{trade_type}] "
+                f"가격: {price:,.2f} USDT | "
+                f"수량: {quantity:.6f} BTC | "
+                f"금액: {total_value:,.2f} USDT | "
+                f"레버리지: {self.leverage}x | "
+                f"주문ID: {order_id} | "
+                f"{'테스트모드' if self.test_mode else '실거래'}"
+            )
+            
+            trade_logger.info(trade_message)
+            self.trade_stats['total_trades'] += 1
+            
+        except Exception as e:
+            logger.error(f"거래 로그 기록 중 오류: {e}")
+    
+    def _log_position_close(self, position_type, entry_price, exit_price, quantity, profit, profit_rate):
+        """포지션 청산 로그 기록"""
+        try:
+            # 수익/손실 여부 판단
+            result = "수익" if profit > 0 else "손실"
+            
+            # 청산 로그 기록
+            close_message = (
+                f"[{position_type} 청산] "
+                f"진입가: {entry_price:,.2f} → 청산가: {exit_price:,.2f} | "
+                f"수량: {quantity:.6f} BTC | "
+                f"{result}: {profit:+,.2f} USDT ({profit_rate:+.2f}%) | "
+                f"레버리지: {self.leverage}x | "
+                f"현재잔고: {self.trade_stats['current_balance']:,.2f} USDT"
+            )
+            
+            trade_logger.info(close_message)
+            
+            # 통계 요약 로그 (매 거래 후)
+            if self.trade_stats['total_trades'] > 0:
+                win_rate = (self.trade_stats['winning_trades'] / self.trade_stats['total_trades']) * 100
+                summary_message = (
+                    f"[거래통계] "
+                    f"총 거래: {self.trade_stats['total_trades']}회 | "
+                    f"롱: {self.trade_stats['long_trades']}회 | "
+                    f"숏: {self.trade_stats['short_trades']}회 | "
+                    f"승률: {win_rate:.1f}% | "
+                    f"총손익: {self.trade_stats['total_profit']:+,.2f} USDT | "
+                    f"수익률: {((self.trade_stats['current_balance'] - self.initial_capital) / self.initial_capital) * 100:+.2f}%"
+                )
+                trade_logger.info(summary_message)
+                trade_logger.info("-" * 100)
+            
+        except Exception as e:
+            logger.error(f"청산 로그 기록 중 오류: {e}")
+    
+    def _update_trade_stats(self, profit, position_type):
+        """거래 통계 업데이트"""
+        try:
+            # 총 손익 업데이트
+            self.trade_stats['total_profit'] += profit
+            self.trade_stats['current_balance'] += profit
+            
+            # 포지션별 손익 업데이트
+            if position_type == 'LONG':
+                self.trade_stats['long_profit'] += profit
+            else:
+                self.trade_stats['short_profit'] += profit
+            
+            # 승/패 카운트
+            if profit > 0:
+                self.trade_stats['winning_trades'] += 1
+            else:
+                self.trade_stats['losing_trades'] += 1
+            
+            # 최대 드로우다운 계산
+            current_drawdown = self.initial_capital - self.trade_stats['current_balance']
+            if current_drawdown > self.trade_stats['max_drawdown']:
+                self.trade_stats['max_drawdown'] = current_drawdown
+                
+        except Exception as e:
+            logger.error(f"거래 통계 업데이트 중 오류: {e}")
     
     def update_market_state(self):
         """현재 선물 포지션 상태 업데이트"""
@@ -762,6 +909,19 @@ class BinanceFuturesAutoTrader:
         """선물 자동 매매 시스템 실행"""
         logger.info(f"선물 자동 매매 시스템 시작 - 심볼: {self.symbol}, 레버리지: {self.leverage}배")
         
+        # 거래 시작 로그
+        start_message = (
+            f"=== 선물 자동매매 시스템 시작 === | "
+            f"심볼: {self.symbol} | "
+            f"타임프레임: {self.timeframe} | "
+            f"레버리지: {self.leverage}x | "
+            f"초기자본: {self.initial_capital:,.2f} USDT | "
+            f"최대거래금액: {self.max_trade_amount or '무제한'} | "
+            f"모드: {'테스트' if self.test_mode else '실거래'}"
+        )
+        trade_logger.info(start_message)
+        trade_logger.info("=" * 100)
+        
         try:
             while True:
                 current_time = datetime.now()
@@ -780,7 +940,46 @@ class BinanceFuturesAutoTrader:
         except Exception as e:
             logger.error(f"선물 매매 프로그램 실행 중 오류 발생: {e}")
         finally:
+            # 최종 통계 로그
+            self._log_final_statistics()
             logger.info("선물 자동 매매 시스템 종료")
+    
+    def _log_final_statistics(self):
+        """최종 거래 통계 로그"""
+        try:
+            if self.trade_stats['total_trades'] > 0:
+                win_rate = (self.trade_stats['winning_trades'] / self.trade_stats['total_trades']) * 100
+                total_return = ((self.trade_stats['current_balance'] - self.initial_capital) / self.initial_capital) * 100
+                avg_profit = self.trade_stats['total_profit'] / self.trade_stats['total_trades']
+                
+                if self.trade_stats['winning_trades'] > 0 and self.trade_stats['losing_trades'] > 0:
+                    avg_win = self.trade_stats['total_profit'] / self.trade_stats['winning_trades'] if self.trade_stats['winning_trades'] > 0 else 0
+                    avg_loss = abs(self.trade_stats['total_profit'] - (avg_win * self.trade_stats['winning_trades'])) / self.trade_stats['losing_trades'] if self.trade_stats['losing_trades'] > 0 else 0
+                    profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+                else:
+                    profit_loss_ratio = 0
+                
+                final_stats = f"""
+=== 최종 거래 통계 ===
+총 거래 횟수: {self.trade_stats['total_trades']}회
+롱 거래: {self.trade_stats['long_trades']}회 | 숏 거래: {self.trade_stats['short_trades']}회
+승리: {self.trade_stats['winning_trades']}회 | 패배: {self.trade_stats['losing_trades']}회
+승률: {win_rate:.1f}%
+총 손익: {self.trade_stats['total_profit']:+,.2f} USDT
+롱 손익: {self.trade_stats['long_profit']:+,.2f} USDT | 숏 손익: {self.trade_stats['short_profit']:+,.2f} USDT
+수익률: {total_return:+.2f}%
+평균 거래당 손익: {avg_profit:+,.2f} USDT
+손익비: {profit_loss_ratio:.2f}
+최대 드로우다운: {self.trade_stats['max_drawdown']:,.2f} USDT
+초기 잔고: {self.initial_capital:,.2f} USDT → 최종 잔고: {self.trade_stats['current_balance']:,.2f} USDT
+=========================================="""
+                
+                trade_logger.info(final_stats)
+            else:
+                trade_logger.info("=== 거래 내역 없음 ===")
+                
+        except Exception as e:
+            logger.error(f"최종 통계 로그 기록 중 오류: {e}")
 
 
 if __name__ == "__main__":
